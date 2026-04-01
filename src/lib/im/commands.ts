@@ -55,7 +55,7 @@ function getAvailableModels(): ImModelEntry[] {
   // Add custom provider models from DB
   try {
     const customs = getDb().prepare(
-      "SELECT id, model_name, name FROM api_providers WHERE provider = 'custom' AND model_name != '' AND status = 'connected'"
+      "SELECT id, model_name, name FROM api_providers WHERE provider = 'custom' AND protocol = 'anthropic-compatible' AND model_name != '' AND status = 'connected'"
     ).all() as { id: string; model_name: string; name: string }[]
     for (const row of customs) {
       models.push({ id: makeCustomModelId(row.id, row.model_name), label: row.model_name, aliases: [] })
