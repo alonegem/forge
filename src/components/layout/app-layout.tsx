@@ -4,10 +4,9 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { TitleBar } from './title-bar'
 import { LeftSidebar } from './left-sidebar'
 import { ProjectModal } from './project-modal'
-import { RightSidebar } from './right-sidebar'
-import { ForgeFileEditor } from './forge-file-editor'
+import { WorkspaceChatPane } from './workspace-chat-pane'
 import { ResizeHandle } from '@/components/ui/resize-handle'
-import { ChatView } from '@/components/views/chat-view'
+import { cn } from '@/lib/utils'
 import { ManageView } from '@/components/views/manage-view'
 import { ImView } from '@/components/views/im-view'
 import { ScheduleView } from '@/components/views/schedule-view'
@@ -16,35 +15,32 @@ import { MarketplaceView } from '@/components/views/marketplace-view'
 import { Onboarding } from '@/components/onboarding'
 import { ProjectSelection } from '@/components/project-selection'
 import { useSessions } from '@/hooks/use-sessions'
-import { useChat } from '@/hooks/use-chat'
 import { useWorkspaces } from '@/hooks/use-workspaces'
 import { useSettings } from '@/hooks/use-settings'
 import { useI18n } from '@/components/providers/i18n-provider'
 import { useTheme } from '@/components/providers/theme-provider'
 import type { View } from '@/lib/types'
 import { GLOBAL_WORKSPACE_ID } from '@/lib/types'
+import type { WorkbenchLayout, WorkspacePaneState } from '@/lib/workbench'
 
-import { getModelProviderId } from '@/lib/models'
+const WORKBENCH_STORAGE_KEY = 'forge-workbench-v1'
+
+const INITIAL_PANES: WorkspacePaneState[] = [
+  { paneId: 'pane-1', workspaceId: null, sessionId: null, lastSessionByWorkspace: {}, openFiles: [], editingFile: null, rightCollapsed: false, rightWidth: 260, editorWidth: 420, permissionModeOverride: null, thinkingModeOverride: null, reloadSeq: 0 },
+]
 
 export function AppLayout() {
   const [activeView, setActiveView] = useState<View>('chat')
   const [leftCollapsed, setLeftCollapsed] = useState(false)
-  const [rightCollapsed, setRightCollapsed] = useState(false)
-  const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
-  const [activeWorkspaceId, setActiveWorkspaceId] = useState<string | null>(null)
+  const [workbenchLayout, setWorkbenchLayout] = useState<WorkbenchLayout>('split-vertical')
+  const [chatPanes, setChatPanes] = useState<WorkspacePaneState[]>(INITIAL_PANES)
+  const [activePaneId, setActivePaneId] = useState<string>('pane-1')
   const [showOnboarding, setShowOnboarding] = useState<boolean | null>(null)
-  const [editingFile, setEditingFile] = useState<string | null>(null)
-  const [editorClosing, setEditorClosing] = useState(false)
   const [leftWidth, setLeftWidth] = useState(240)
-  const [rightWidth, setRightWidth] = useState(260)
-  const [editorWidth, setEditorWidth] = useState(520)
   const [projectModalOpen, setProjectModalOpen] = useState(false)
+  const hasRestoredWorkbenchRef = useRef(false)
 
   const { settings, loading: settingsLoading, updateSettings } = useSettings()
-  // Per-session permission mode override (null = use global Settings default)
-  const [sessionPermMode, setSessionPermMode] = useState<string | null>(null)
-  // Per-session thinking mode override (null = use global Settings default)
-  const [sessionThinkMode, setSessionThinkMode] = useState<string | null>(null)
   const { setLocale } = useI18n()
   const { setTheme } = useTheme()
   const { workspaces, openProjectFolder, removeProject, touchWorkspace, refreshWorkspaces } = useWorkspaces()
@@ -73,7 +69,6 @@ export function AppLayout() {
   // This aligns with Cursor/VS Code behavior where each launch starts with project selection.
 
   const { sessions, loading: sessionsLoading, createSession, updateSession, deleteSession, refreshSessions } = useSessions()
-  const { messages, streaming, isThinking, error, sendMessage, loadMessages, stopStreaming, clearMessages, sendPermissionDecision } = useChat(activeSessionId)
 
   // Apply font settings as CSS variables
   const fontVars = useMemo(() => {
@@ -106,61 +101,187 @@ export function AppLayout() {
     }
   }, [])
 
-  const showRightSidebar = activeView === 'chat'
+  useEffect(() => {
+    if (hasRestoredWorkbenchRef.current) return
+    hasRestoredWorkbenchRef.current = true
+    try {
+      const raw = window.localStorage.getItem(WORKBENCH_STORAGE_KEY)
+      if (!raw) return
+      const parsed = JSON.parse(raw) as {
+        activeView?: View
+        leftCollapsed?: boolean
+        leftWidth?: number
+        workbenchLayout?: WorkbenchLayout
+        activePaneId?: string
+        panes?: Array<Partial<WorkspacePaneState>>
+      }
 
-  // Filter sessions by active workspace
-  const filteredSessions = useMemo(
-    () => sessions.filter((s) => s.workspace === activeWorkspaceId),
-    [sessions, activeWorkspaceId]
+      if (parsed.activeView) setActiveView(parsed.activeView)
+      if (typeof parsed.leftCollapsed === 'boolean') setLeftCollapsed(parsed.leftCollapsed)
+      if (typeof parsed.leftWidth === 'number') setLeftWidth(parsed.leftWidth)
+      if (parsed.workbenchLayout) setWorkbenchLayout(parsed.workbenchLayout)
+
+      if (Array.isArray(parsed.panes) && parsed.panes.length > 0) {
+        const restoredPanes: WorkspacePaneState[] = parsed.panes.slice(0, 4).map((pane, index) => ({
+          paneId: pane.paneId || `pane-restored-${index + 1}`,
+          workspaceId: pane.workspaceId || null,
+          sessionId: pane.sessionId || null,
+          lastSessionByWorkspace: pane.lastSessionByWorkspace || {},
+          openFiles: pane.openFiles || [],
+          editingFile: pane.editingFile || null,
+          rightCollapsed: typeof pane.rightCollapsed === 'boolean' ? pane.rightCollapsed : false,
+          rightWidth: typeof pane.rightWidth === 'number' ? pane.rightWidth : 260,
+          editorWidth: typeof pane.editorWidth === 'number' ? pane.editorWidth : 420,
+          permissionModeOverride: pane.permissionModeOverride || null,
+          thinkingModeOverride: pane.thinkingModeOverride || null,
+          reloadSeq: 0,
+        }))
+        setChatPanes(restoredPanes)
+        const restoredActivePaneId = parsed.activePaneId && restoredPanes.some((pane) => pane.paneId === parsed.activePaneId)
+          ? parsed.activePaneId
+          : restoredPanes[0].paneId
+        setActivePaneId(restoredActivePaneId)
+      }
+    } catch {
+      // ignore invalid persisted state
+    }
+  }, [])
+
+  useEffect(() => {
+    if (workspaces.length === 0) return
+    setChatPanes((prev) => prev.map((pane, index) => {
+      if (pane.workspaceId && workspaces.some((workspace) => workspace.id === pane.workspaceId)) {
+        return pane
+      }
+      const fallbackWorkspace = workspaces[index]?.id || (index === 0 ? workspaces[0]?.id : null) || null
+      return {
+        ...pane,
+        workspaceId: fallbackWorkspace,
+        sessionId: null,
+        openFiles: [],
+        permissionModeOverride: null,
+        thinkingModeOverride: null,
+      }
+    }))
+  }, [workspaces])
+
+  useEffect(() => {
+    if (!hasRestoredWorkbenchRef.current) return
+    try {
+      window.localStorage.setItem(WORKBENCH_STORAGE_KEY, JSON.stringify({
+        activeView,
+        leftCollapsed,
+        leftWidth,
+        workbenchLayout,
+        activePaneId,
+        panes: chatPanes.map((pane) => ({
+          paneId: pane.paneId,
+          workspaceId: pane.workspaceId,
+          sessionId: pane.sessionId,
+          lastSessionByWorkspace: pane.lastSessionByWorkspace,
+          openFiles: pane.openFiles,
+          editingFile: pane.editingFile,
+          rightCollapsed: pane.rightCollapsed,
+          rightWidth: pane.rightWidth,
+          editorWidth: pane.editorWidth,
+          permissionModeOverride: pane.permissionModeOverride,
+          thinkingModeOverride: pane.thinkingModeOverride,
+        })),
+      }))
+    } catch {
+      // ignore storage failures
+    }
+  }, [activePaneId, activeView, chatPanes, leftCollapsed, leftWidth, workbenchLayout])
+
+  const updatePane = useCallback((paneId: string, updates: Partial<WorkspacePaneState>) => {
+    setChatPanes((prev) => prev.map((pane) => pane.paneId === paneId ? { ...pane, ...updates } : pane))
+  }, [])
+
+  const createEmptyPane = useCallback((): WorkspacePaneState => ({
+    paneId: `pane-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    workspaceId: null,
+    sessionId: null,
+    lastSessionByWorkspace: {},
+    openFiles: [],
+    editingFile: null,
+    rightCollapsed: false,
+    rightWidth: 260,
+    editorWidth: 420,
+    permissionModeOverride: null,
+    thinkingModeOverride: null,
+    reloadSeq: 0,
+  }), [])
+
+  const handleAddPane = useCallback(() => {
+    if (chatPanes.length >= 4) return
+    const newPane = createEmptyPane()
+    setChatPanes((prev) => [...prev, newPane])
+    setActivePaneId(newPane.paneId)
+    setActiveView('chat')
+  }, [chatPanes.length, createEmptyPane])
+
+  const handleClosePane = useCallback((paneId: string) => {
+    setChatPanes((prev) => {
+      if (prev.length === 1) return prev
+      const next = prev.filter((pane) => pane.paneId !== paneId)
+      if (activePaneId === paneId) {
+        setActivePaneId(next[0]?.paneId || 'pane-1')
+      }
+      return next
+    })
+  }, [activePaneId])
+
+  const activePane = useMemo(
+    () => chatPanes.find((pane) => pane.paneId === activePaneId) || chatPanes[0],
+    [activePaneId, chatPanes],
   )
 
-  const activeWorkspace = workspaces.find((w) => w.id === activeWorkspaceId) || null
+  const visiblePanes = useMemo(
+    () => workbenchLayout === 'single' ? (activePane ? [activePane] : []) : chatPanes,
+    [activePane, chatPanes, workbenchLayout],
+  )
 
-  // Auto-select first session in workspace
-  useEffect(() => {
-    if (!sessionsLoading && filteredSessions.length > 0 && !filteredSessions.find((s) => s.id === activeSessionId)) {
-      setActiveSessionId(filteredSessions[0].id)
-    }
-  }, [filteredSessions, sessionsLoading, activeSessionId])
+  const activeWorkspaceId = activePane?.workspaceId || null
+  const activeSessionId = activePane?.sessionId || null
 
-  // Load messages when session changes; reset per-session permission mode to global default
-  useEffect(() => {
-    if (activeSessionId) {
-      loadMessages(activeSessionId)
-    } else {
-      clearMessages()
-    }
-    setSessionPermMode(null)
-    setSessionThinkMode(null)
-  }, [activeSessionId, loadMessages, clearMessages])
+  const filteredSessions = useMemo(
+    () => sessions.filter((session) => session.workspace === activeWorkspaceId),
+    [sessions, activeWorkspaceId],
+  )
+
+  const activeWorkspace = workspaces.find((workspace) => workspace.id === activeWorkspaceId) || null
 
   const handleNewSession = useCallback(async () => {
-    if (!activeWorkspaceId) return
+    if (!activePane?.workspaceId) return
     const session = await createSession({
-      workspace: activeWorkspaceId,
+      workspace: activePane.workspaceId,
       model: settings.default_model || 'claude-sonnet-4-6',
     })
-    setActiveSessionId(session.id)
+    updatePane(activePane.paneId, { sessionId: session.id, openFiles: [], editingFile: null })
     setActiveView('chat')
-  }, [createSession, activeWorkspaceId, settings.default_model])
+  }, [activePane, createSession, settings.default_model, updatePane])
 
   const handleSelectSession = useCallback((id: string) => {
-    setActiveSessionId(id)
+    if (!activePane) return
+    updatePane(activePane.paneId, { sessionId: id })
     setActiveView('chat')
-  }, [])
+  }, [activePane, updatePane])
 
   // Listen for session navigation from Schedule view (View Session links)
   useEffect(() => {
     const handler = (e: Event) => {
       const { sessionId } = (e as CustomEvent).detail || {}
       if (sessionId) {
-        setActiveSessionId(sessionId)
+        const session = sessions.find((s) => s.id === sessionId)
+        if (session && activePane) {
+          updatePane(activePane.paneId, { workspaceId: session.workspace, sessionId, openFiles: [], editingFile: null })
+        }
         setActiveView('chat')
       }
     }
     window.addEventListener('forge:navigate-session', handler)
     return () => window.removeEventListener('forge:navigate-session', handler)
-  }, [])
+  }, [activePane, sessions, updatePane])
 
   // Refresh session list when scheduled tasks create new sessions
   useEffect(() => {
@@ -169,18 +290,7 @@ export function AppLayout() {
     return () => window.removeEventListener('forge:sessions-changed', handler)
   }, [refreshSessions])
 
-  // Refs for SSE handlers to avoid stale closures (P14 fix)
-  const activeSessionIdRef = useRef(activeSessionId)
-  activeSessionIdRef.current = activeSessionId
-  const activeWorkspaceIdRef = useRef(activeWorkspaceId)
-  activeWorkspaceIdRef.current = activeWorkspaceId
-  const refreshSessionsRef = useRef(refreshSessions)
-  refreshSessionsRef.current = refreshSessions
-  const loadMessagesRef = useRef(loadMessages)
-  loadMessagesRef.current = loadMessages
-
   // SSE listener for real-time IM Bridge → Desktop sync
-  // Connection established once, uses refs for current values (P14 fix)
   useEffect(() => {
     let eventSource: EventSource | null = null
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null
@@ -193,28 +303,31 @@ export function AppLayout() {
       eventSource.addEventListener('im:message', (e: MessageEvent) => {
         try {
           const data = JSON.parse(e.data) as { sessionId?: string; workspaceId?: string }
-          refreshSessionsRef.current()
-          if (data.sessionId && data.sessionId === activeSessionIdRef.current) {
-            loadMessagesRef.current(data.sessionId)
+          refreshSessions()
+          if (data.sessionId) {
+            setChatPanes((prev) => prev.map((pane) =>
+              pane.sessionId === data.sessionId ? { ...pane, reloadSeq: pane.reloadSeq + 1 } : pane
+            ))
           }
         } catch { /* ignore malformed */ }
       })
 
       eventSource.addEventListener('im:command', () => {
-        refreshSessionsRef.current()
+        refreshSessions()
       })
 
       eventSource.addEventListener('im:session-changed', (e: MessageEvent) => {
         try {
           const data = JSON.parse(e.data) as { sessionId?: string; workspaceId?: string }
-          refreshSessionsRef.current()
-          if (data.workspaceId && data.workspaceId !== activeWorkspaceIdRef.current) {
-            setActiveWorkspaceId(data.workspaceId)
-          }
-          // Switch desktop active session to match IM session change (P15 fix)
-          if (data.sessionId) {
-            setActiveSessionId(data.sessionId)
-            loadMessagesRef.current(data.sessionId)
+          refreshSessions()
+          if (data.sessionId && activePane) {
+            updatePane(activePane.paneId, {
+              workspaceId: data.workspaceId || activePane.workspaceId,
+              sessionId: data.sessionId,
+              openFiles: [],
+              editingFile: null,
+              reloadSeq: activePane.reloadSeq + 1,
+            })
           }
         } catch { /* ignore malformed */ }
       })
@@ -235,8 +348,7 @@ export function AppLayout() {
       eventSource?.close()
       if (reconnectTimer) clearTimeout(reconnectTimer)
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []) // Single connection, uses refs for mutable values
+  }, [activePane, refreshSessions, updatePane])
 
   // Listen for slash command navigation events from ChatView
   useEffect(() => {
@@ -244,12 +356,20 @@ export function AppLayout() {
       const { command } = (e as CustomEvent).detail || {}
       switch (command) {
         case 'memory':
-          // Open MEMORY.md in the file editor panel
-          setEditingFile('.claude/MEMORY.md')
+          if (activePane) {
+            updatePane(activePane.paneId, {
+              editingFile: '.claude/MEMORY.md',
+              openFiles: Array.from(new Set([...activePane.openFiles, '.claude/MEMORY.md'])),
+            })
+          }
           break
         case 'init':
-          // Open CLAUDE.md in the file editor panel
-          setEditingFile('.claude/CLAUDE.md')
+          if (activePane) {
+            updatePane(activePane.paneId, {
+              editingFile: '.claude/CLAUDE.md',
+              openFiles: Array.from(new Set([...activePane.openFiles, '.claude/CLAUDE.md'])),
+            })
+          }
           break
         case 'workspace':
           setProjectModalOpen(true)
@@ -258,19 +378,21 @@ export function AppLayout() {
     }
     window.addEventListener('forge:slash-command', handler)
     return () => window.removeEventListener('forge:slash-command', handler)
-  }, [])
+  }, [activePane, updatePane])
 
   // Listen for session reload events (after compact)
   useEffect(() => {
     const handler = (e: Event) => {
       const { sessionId } = (e as CustomEvent).detail || {}
-      if (sessionId && sessionId === activeSessionId) {
-        loadMessages(sessionId)
+      if (sessionId) {
+        setChatPanes((prev) => prev.map((pane) =>
+          pane.sessionId === sessionId ? { ...pane, reloadSeq: pane.reloadSeq + 1 } : pane
+        ))
       }
     }
     window.addEventListener('forge:session-reload', handler)
     return () => window.removeEventListener('forge:session-reload', handler)
-  }, [activeSessionId, loadMessages])
+  }, [])
 
   const handleRenameSession = useCallback(async (id: string, title: string) => {
     await updateSession(id, { title })
@@ -278,129 +400,73 @@ export function AppLayout() {
 
   const handleDeleteSession = useCallback(async (id: string) => {
     await deleteSession(id)
-    if (activeSessionId === id) {
-      setActiveSessionId(null)
-    }
-  }, [deleteSession, activeSessionId])
-
-  // Per-provider thinking mode default from settings (normalizes legacy values)
-  const providerThinkingDefault = useMemo(() => {
-    const session = sessions.find(s => s.id === activeSessionId)
-    const model = session?.model || settings.default_model || 'claude-sonnet-4-6'
-    const providerType = getModelProviderId(model) || 'anthropic'
-    const raw = settings[`thinking_mode_${providerType}`] || settings.thinking_mode || 'auto'
-    const legacy: Record<string, string> = { adaptive: 'auto', enabled: 'max', disabled: 'off' }
-    return legacy[raw] || raw
-  }, [sessions, activeSessionId, settings])
-
-  const handleSendMessage = useCallback(async (content: string, _permissionMode?: string, _thinkingMode?: string, attachments?: Array<{ name: string; filename: string; mimeType: string; tier: string }>) => {
-    const effectivePermMode = sessionPermMode || settings.desktop_permission_mode || 'confirm'
-    const effectiveThinkMode = sessionThinkMode || providerThinkingDefault
-    await sendMessage(content, effectivePermMode, effectiveThinkMode, attachments)
-    refreshSessions()
-  }, [sendMessage, refreshSessions, sessionPermMode, sessionThinkMode, settings.desktop_permission_mode, providerThinkingDefault])
-
-  const handleUpdateSessionModel = useCallback(async (model: string) => {
-    if (!activeSessionId) return
-    await updateSession(activeSessionId, { model })
-  }, [updateSession, activeSessionId])
-
-  // Slash command: rename current session from chat input
-  const handleRenameFromChat = useCallback(async (title: string) => {
-    if (!activeSessionId) return
-    await updateSession(activeSessionId, { title })
-    refreshSessions()
-  }, [updateSession, activeSessionId, refreshSessions])
-
-  // Slash command: clear current session messages
-  const handleClearSession = useCallback(async () => {
-    if (!activeSessionId) return
-    await fetch(`/api/sessions/${activeSessionId}/clear`, { method: 'POST' })
-    clearMessages()
-  }, [activeSessionId, clearMessages])
-
-  const handlePermissionModeChange = useCallback((mode: string) => {
-    // Per-session override — does NOT change global Settings
-    setSessionPermMode(mode)
-  }, [])
-
-  const handleThinkingModeChange = useCallback((mode: string) => {
-    // Per-session override — does NOT change global Settings
-    setSessionThinkMode(mode)
-  }, [])
+    setChatPanes((prev) => prev.map((pane) =>
+      pane.sessionId === id ? { ...pane, sessionId: null } : pane
+    ))
+  }, [deleteSession])
 
   const handleSwitchWorkspace = useCallback((wsId: string) => {
-    setActiveWorkspaceId(wsId)
-    setActiveSessionId(null)
-    setEditingFile(null)
+    if (!activePane) return
+    updatePane(activePane.paneId, {
+      workspaceId: wsId,
+      sessionId: null,
+      openFiles: [],
+      editingFile: null,
+      permissionModeOverride: null,
+      thinkingModeOverride: null,
+    })
     touchWorkspace(wsId)
-  }, [touchWorkspace])
+  }, [activePane, touchWorkspace, updatePane])
 
   const handleOpenProjectFolder = useCallback(async () => {
     const folderPath = await window.electronAPI?.openDirectoryDialog()
     if (!folderPath) return
 
     const ws = await openProjectFolder(folderPath)
-    setActiveWorkspaceId(ws.id)
-    setActiveSessionId(null)
-    setEditingFile(null)
-  }, [openProjectFolder])
+    if (activePane) {
+      updatePane(activePane.paneId, {
+        workspaceId: ws.id,
+        sessionId: null,
+        openFiles: [],
+        editingFile: null,
+        permissionModeOverride: null,
+        thinkingModeOverride: null,
+      })
+    }
+  }, [activePane, openProjectFolder, updatePane])
 
   const handleRemoveProject = useCallback(async (id: string) => {
     await removeProject(id)
-    if (activeWorkspaceId === id) {
-      // Switch to first remaining workspace when the active one is removed
-      const remaining = workspaces.find(w => w.id !== id)
-      setActiveWorkspaceId(remaining?.id || null)
-      setActiveSessionId(null)
-      setEditingFile(null)
-    }
-  }, [removeProject, activeWorkspaceId])
+    const remaining = workspaces.find((workspace) => workspace.id !== id)
+    setChatPanes((prev) => prev.map((pane) =>
+      pane.workspaceId === id
+        ? {
+            ...pane,
+            workspaceId: remaining?.id || null,
+            sessionId: null,
+            openFiles: [],
+            editingFile: null,
+            permissionModeOverride: null,
+            thinkingModeOverride: null,
+          }
+        : pane
+    ))
+  }, [removeProject, workspaces])
 
   // Refs to track current panel widths (avoids stale closures in resize handlers)
   const leftWidthRef = useRef(leftWidth)
-  const rightWidthRef = useRef(rightWidth)
   const leftCollapsedRef = useRef(leftCollapsed)
-  const rightCollapsedRef = useRef(rightCollapsed)
   useEffect(() => { leftWidthRef.current = leftWidth }, [leftWidth])
-  useEffect(() => { rightWidthRef.current = rightWidth }, [rightWidth])
   useEffect(() => { leftCollapsedRef.current = leftCollapsed }, [leftCollapsed])
-  useEffect(() => { rightCollapsedRef.current = rightCollapsed }, [rightCollapsed])
 
   // Panel resize handlers — dynamic max ensures chat area keeps ≥360px
   const handleLeftResize = useCallback((delta: number) => {
     setLeftWidth(w => {
-      const rw = rightCollapsedRef.current ? 36 : (showRightSidebar ? rightWidthRef.current : 0)
+      const rw = 0
       const maxLeft = window.innerWidth - rw - 360 - 12
       return Math.max(180, Math.min(maxLeft, w + delta))
     })
-  }, [showRightSidebar])
-  const handleRightResize = useCallback((delta: number) => {
-    setRightWidth(w => {
-      const lw = leftCollapsedRef.current ? 52 : leftWidthRef.current
-      const maxRight = window.innerWidth - lw - 360 - 12
-      return Math.max(200, Math.min(maxRight, w - delta))
-    })
   }, [])
-  const handleEditorResize = useCallback((delta: number) => {
-    setEditorWidth(w => Math.max(320, Math.min(window.innerWidth * 0.6, w - delta)))
-  }, [])
-
-  // Open a file in the inline editor (full tree path, e.g. ".claude/CLAUDE.md" or "README.md")
-  const handleOpenFile = useCallback((filename: string) => {
-    setEditingFile(prev => prev === filename ? null : filename)
-  }, [])
-
-  const handleCloseEditor = useCallback(() => {
-    setEditorClosing(true)
-    setTimeout(() => {
-      setEditingFile(null)
-      setEditorClosing(false)
-    }, 200)
-  }, [])
-
-  const activeSession = sessions.find((s) => s.id === activeSessionId) || null
-
   // Wait for settings to load before deciding
   if (showOnboarding === null) {
     return <div className="flex items-center justify-center h-screen bg-page" />
@@ -409,24 +475,27 @@ export function AppLayout() {
   if (showOnboarding) {
     return <Onboarding onComplete={(wsId) => {
       setShowOnboarding(false)
-      if (wsId) setActiveWorkspaceId(wsId)
+      if (wsId) {
+        updatePane('pane-1', { workspaceId: wsId })
+        void refreshWorkspaces()
+      }
     }} />
   }
 
-  // Show project selection page until user explicitly picks a workspace.
-  // This runs on every launch (not just first time) — no auto-restore.
-  if (!activeWorkspaceId) {
+  if (workspaces.length === 0 && !chatPanes.some((pane) => pane.workspaceId)) {
     return <ProjectSelection
       workspaces={workspaces}
       onSelectWorkspace={(id) => {
-        setActiveWorkspaceId(id)
+        updatePane('pane-1', { workspaceId: id })
+        setActivePaneId('pane-1')
         touchWorkspace(id)
       }}
       onOpenFolder={async () => {
         const folderPath = await window.electronAPI?.openDirectoryDialog()
         if (!folderPath) return
         const ws = await openProjectFolder(folderPath)
-        setActiveWorkspaceId(ws.id)
+        updatePane('pane-1', { workspaceId: ws.id })
+        setActivePaneId('pane-1')
       }}
       onRemoveWorkspace={async (id) => {
         await removeProject(id)
@@ -465,26 +534,79 @@ export function AppLayout() {
           <div className="flex-1 shrink-0 overflow-hidden min-w-[360px]">
             <div key={activeView} className="h-full animate-fade-in">
               {activeView === 'chat' && (
-                <ChatView
-                  session={activeSession}
-                  messages={messages}
-                  streaming={streaming}
-                  isThinking={isThinking}
-                  error={error}
-                  workspaceName={activeWorkspace?.name || ''}
-                  workspaceId={activeWorkspaceId}
-                  permissionMode={sessionPermMode || settings.desktop_permission_mode || 'confirm'}
-                  thinkingMode={sessionThinkMode || providerThinkingDefault}
-                  onSendMessage={handleSendMessage}
-                  onStopStreaming={stopStreaming}
-                  onNewSession={handleNewSession}
-                  onPermissionDecision={sendPermissionDecision}
-                  onModelChange={handleUpdateSessionModel}
-                  onPermissionModeChange={handlePermissionModeChange}
-                  onThinkingModeChange={handleThinkingModeChange}
-                  onRenameSession={handleRenameFromChat}
-                  onClearSession={handleClearSession}
-                />
+                <div className="flex h-full w-full flex-col gap-2 p-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-1">
+                      {([
+                        { id: 'single', label: 'Single' },
+                        { id: 'split-vertical', label: 'Split V' },
+                        { id: 'split-horizontal', label: 'Split H' },
+                        { id: 'grid', label: 'Grid' },
+                      ] as const).map((option) => (
+                        <button
+                          key={option.id}
+                          onClick={() => setWorkbenchLayout(option.id)}
+                          className={cn(
+                            'h-8 px-3 rounded-lg border text-[12px] font-medium transition-colors',
+                            workbenchLayout === option.id
+                              ? 'border-indigo bg-indigo/10 text-indigo'
+                              : 'border-subtle text-secondary hover:bg-surface-hover'
+                          )}
+                        >
+                          {option.label}
+                        </button>
+                      ))}
+                    </div>
+                    <button
+                      onClick={handleAddPane}
+                      disabled={chatPanes.length >= 4}
+                      className="inline-flex items-center gap-1.5 h-8 px-3 rounded-lg border border-subtle text-[12px] font-medium text-secondary hover:bg-surface-hover transition-colors disabled:opacity-40"
+                    >
+                      + Add Pane
+                    </button>
+                  </div>
+                  <div
+                    className={cn(
+                      'flex-1 min-h-0 w-full gap-3',
+                      workbenchLayout === 'single' && 'flex',
+                      workbenchLayout === 'split-vertical' && 'flex',
+                      workbenchLayout === 'split-horizontal' && 'flex flex-col',
+                      workbenchLayout === 'grid' && 'grid h-full grid-cols-2 auto-rows-fr'
+                    )}
+                  >
+                    {visiblePanes.map((pane, index) => (
+                      <div
+                        key={pane.paneId}
+                        className={cn(
+                          'min-w-0 min-h-0',
+                          workbenchLayout === 'single' && 'flex-1 basis-0 h-full',
+                          workbenchLayout === 'split-vertical' && 'flex-1 basis-0 h-full',
+                          workbenchLayout === 'split-horizontal' && 'flex-1 basis-0 min-h-0',
+                          workbenchLayout === 'grid' && 'min-h-0 h-full'
+                        )}
+                      >
+                        <WorkspaceChatPane
+                          pane={pane}
+                          paneIndex={index}
+                          totalPanes={visiblePanes.length}
+                          focused={pane.paneId === activePaneId}
+                          sessions={sessions}
+                          workspaces={workspaces}
+                          settings={settings}
+                          updateSettings={updateSettings}
+                          onFocus={setActivePaneId}
+                          onUpdatePane={updatePane}
+                          onClosePane={handleClosePane}
+                          createSession={createSession}
+                          updateSession={updateSession}
+                          refreshSessions={refreshSessions}
+                          openProjectFolder={openProjectFolder}
+                          touchWorkspace={touchWorkspace}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </div>
               )}
               {activeView === 'manage' && (
                 <ManageView
@@ -497,8 +619,9 @@ export function AppLayout() {
               {activeView === 'marketplace' && (
                 <MarketplaceView
                   onUseTemplate={(workspaceId, sessionId) => {
-                    setActiveWorkspaceId(workspaceId)
-                    setActiveSessionId(sessionId)
+                    if (activePane) {
+                      updatePane(activePane.paneId, { workspaceId, sessionId, openFiles: [], editingFile: null })
+                    }
                     setActiveView('chat')
                     refreshSessions()
                     refreshWorkspaces()
@@ -508,40 +631,7 @@ export function AppLayout() {
               {activeView === 'settings' && <SettingsView />}
             </div>
           </div>
-
-          {/* Inline file editor panel — slides out between main and right sidebar */}
-          {editingFile && activeView === 'chat' && activeWorkspaceId && (
-            <>
-              {!editorClosing && <ResizeHandle direction="horizontal" onResize={handleEditorResize} />}
-              <ForgeFileEditor
-                filename={editingFile}
-                workspaceId={activeWorkspaceId}
-                workspacePath={activeWorkspace?.path || ''}
-                onClose={handleCloseEditor}
-                width={editorClosing ? 0 : editorWidth}
-                closing={editorClosing}
-              />
-            </>
-          )}
         </main>
-
-        {showRightSidebar && (
-          <>
-            {!rightCollapsed && (
-              <ResizeHandle direction="horizontal" onResize={handleRightResize} />
-            )}
-            <RightSidebar
-              collapsed={rightCollapsed}
-              onToggleCollapse={() => setRightCollapsed(!rightCollapsed)}
-              workspaceId={activeWorkspaceId || undefined}
-              workspaceName={activeWorkspace?.name || ''}
-              workspacePath={activeWorkspace?.path || ''}
-              onOpenFile={handleOpenFile}
-              activeFile={editingFile}
-              width={rightWidth}
-            />
-          </>
-        )}
       </div>
 
       <ProjectModal
